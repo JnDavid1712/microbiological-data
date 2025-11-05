@@ -33,14 +33,17 @@ def detectar_columna_texto(df):
         return None
     return best[0]
 
+
 def normalizar_token(t):
     return re.sub(r"[^\wÁÉÍÓÚÑáéíóúñ()/-]", "", str(t)).upper()
+
 
 def limpiar_cmi(valor):
     if not valor:
         return ""
     m = re.search(r"-?\d+(?:\.\d+)?", str(valor))
     return m.group(0) if m else ""
+
 
 def limpiar_nombre_antibiotico(raw):
     if not raw:
@@ -52,6 +55,7 @@ def limpiar_nombre_antibiotico(raw):
     s = re.sub(r"[^\w /\-()]", "", s, flags=re.UNICODE).upper()
     return s.strip(":,- ")
 
+
 def es_antivalor_truncado(tok):
     t = normalizar_token(tok)
     for target in ANTVALOR_SET:
@@ -59,12 +63,14 @@ def es_antivalor_truncado(tok):
             return True
     return False
 
+
 def preprocesar_texto(texto):
     texto = str(texto or "")
     texto = texto.replace("\r", "")
     texto = re.sub(r"\b0\s+0\b", "\n", texto)
     texto = re.sub(r"[ \t]{2,}", " ", texto)
     return texto.strip()
+
 
 def extraer_blee(texto):
     texto = str(texto or "")
@@ -75,6 +81,7 @@ def extraer_blee(texto):
             if re.search(r"(?i)neg", linea):
                 return "Negativo"
     return ""
+
 
 def extraer_microorganismos(texto):
     texto = preprocesar_texto(texto)
@@ -92,25 +99,33 @@ def extraer_microorganismos(texto):
             return val.strip()
     return ""
 
+
 def extraer_antibioticos_cmi_valor(texto):
     texto = preprocesar_texto(texto)
     resultados = []
+
     for linea in texto.splitlines():
         linea = linea.strip()
         if not linea:
             continue
-        linea = re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ0-9 /\-<>=.()+]", "", linea)
+
+        # limpieza de símbolos extra
+        linea = re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ0-9 /\-<>=.()+µ]", "", linea)
+
+        # patrón más permisivo (nombre + CMI opcional + interpretación)
         m = re.match(
-            r"^([A-Za-zÁÉÍÓÚÑ0-9 /\-()]+?)\s+([<>]=?\s*-?\d*\.?\d+|-?\d+\.?\d*|\d+)\s+([A-Za-z()\-+]+)",
+            r"^([A-Za-zÁÉÍÓÚÑáéíóúñ0-9 /()\-]+?)\s*(?:([<>]=?\s*-?\d*\.?\d+|-?\d+\.?\d*)\s*)?([A-Za-zÁÉÍÓÚÑáéíóúñ()\-+]+)$",
             linea
         )
         if not m:
             continue
+
         antib_raw, cmi_raw, val_raw = m.groups()
         antib = limpiar_nombre_antibiotico(antib_raw)
         cmi = limpiar_cmi(cmi_raw)
         val_tok = normalizar_token(val_raw)
-        if not cmi or not antib:
+
+        if not antib:
             continue
 
         if es_antivalor_truncado(val_tok):
@@ -136,6 +151,7 @@ def extraer_antibioticos_cmi_valor(texto):
         )
         if valid:
             resultados.append((antib_upper, cmi, val_norm))
+
     if not resultados:
         return [("", "", "")]
     seen, out = set(), []
@@ -145,6 +161,51 @@ def extraer_antibioticos_cmi_valor(texto):
             seen.add(key)
             out.append((a, c, v))
     return out
+
+
+def dividir_bloques_por_microorganismo(texto):
+    texto = preprocesar_texto(texto)
+    if not re.search(r"(?mi)^\s*(\d+\.)|(^\*\s*Microorganismo)", texto):
+        return [texto]
+    bloques = re.split(r"(?mi)(?:^\s*\d+\.\s*$|(?=^\*\s*Microorganismo))", texto)
+    bloques = [b.strip() for b in bloques if b.strip()]
+    return bloques
+
+
+def extraer_todo_por_bloques(texto):
+    texto = str(texto or "").strip()
+    bloques = dividir_bloques_por_microorganismo(texto)
+    resultados = []
+
+    for bloque in bloques:
+        micro = extraer_microorganismos(bloque)
+        antibs = extraer_antibioticos_cmi_valor(bloque)
+
+        if not micro and antibs == [("", "", "")]:
+            continue
+
+        if antibs == [("", "", "")]:
+            resultados.append({
+                "Microorganismo": micro,
+                "Antibiotico": "",
+                "CMI": "",
+                "ANTVALOR": ""
+            })
+        else:
+            for a, c, v in antibs:
+                if not (a or c or v or micro):
+                    continue
+                resultados.append({
+                    "Microorganismo": micro,
+                    "Antibiotico": a,
+                    "CMI": c,
+                    "ANTVALOR": v
+                })
+
+    if not resultados:
+        return [{"Microorganismo": "", "Antibiotico": "", "CMI": "", "ANTVALOR": ""}]
+    return resultados
+
 
 # ==============================
 # LECTURA DE ARCHIVOS
@@ -169,16 +230,14 @@ if text_col is None:
 if text_col is None:
     raise RuntimeError("No se detectó la columna de texto del informe")
 
-df["Microorganismos"] = df[text_col].apply(extraer_microorganismos)
-df["BLEE"] = df[text_col].apply(extraer_blee)
-df["Antibioticos_detalle"] = df[text_col].apply(extraer_antibioticos_cmi_valor)
-
-df_explotado = df.explode("Antibioticos_detalle", ignore_index=True)
-detalles = pd.DataFrame(df_explotado["Antibioticos_detalle"].tolist(), columns=["Antibiotico", "CMI", "ANTVALOR"])
+df["Resultados_bloques"] = df[text_col].apply(extraer_todo_por_bloques)
+df_explotado = df.explode("Resultados_bloques", ignore_index=True)
+detalles = pd.DataFrame(df_explotado["Resultados_bloques"].tolist())
 df_final = pd.concat(
-    [df_explotado.drop(columns=["Antibioticos_detalle", text_col], errors="ignore"), detalles],
+    [df_explotado.drop(columns=["Resultados_bloques", text_col], errors="ignore"), detalles],
     axis=1
 )
+df_final["BLEE"] = df[text_col].apply(extraer_blee)
 
 df_final.to_excel(SALIDA_PATH, index=False)
 print(f"✅ Archivo generado correctamente: {SALIDA_PATH}")
