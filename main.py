@@ -85,18 +85,34 @@ def extraer_blee(texto):
 
 def extraer_microorganismos(texto):
     texto = preprocesar_texto(texto)
+    if re.search(r"(?i)para\s+otros\s+microorganism", texto):
+        return ""
+
+    # limpieza extra: eliminar los molestos "0 0"
+    texto = re.sub(r"\b0\s*0\b", " ", texto)
+
+    # patrones más flexibles que permiten:
+    # - presencia de número tipo "1:"
+    # - texto truncado o sin espacio
+    # - microorganismos con nombres compuestos
     patrones = [
-        r"(?mi)microorganism\w*\s+aislado\s*:?\s*([A-Za-zÁÉÍÓÚÑáéíóúñ0-9 ()./-]+)",
-        r"(?mi)microorganism\w*\s*:?\s*([A-Za-zÁÉÍÓÚÑáéíóúñ0-9 ()./-]+)",
-        r"(?mi)microorganismo\s*[:\s-]*([A-Za-zÁÉÍÓÚÑáéíóúñ0-9 ()./-]+)",
-        r"(?mi)\bais[^\w]{0,3}lado[:\s-]*([A-Za-zÁÉÍÓÚÑáéíóúñ0-9 ()./-]+)",
+        # Ej: Microorganismo 1: Candida parapsilosis
+        r"(?mi)\bmicroorganism\w*\s*(?:\d+:)?\s*([A-Za-zÁÉÍÓÚÑáéíóúñ]+(?:[\s\-]?[A-Za-zÁÉÍÓÚÑáéíóúñ]+)?)",
+        # Ej: MICROORGANISMO Proteus mirabil
+        r"(?mi)\bmicroorganism\w*[:\-\s]+([A-Za-zÁÉÍÓÚÑáéíóúñ]+(?:[\s\-]?[A-Za-zÁÉÍÓÚÑáéíóúñ]+)?)",
+        # fallback genérico (cuando no hay palabra "microorganismo")
+        r"(?mi)\baislado\s*de\s*([A-Za-zÁÉÍÓÚÑáéíóúñ]+(?:[\s\-]?[A-Za-zÁÉÍÓÚÑáéíóúñ]+)?)"
     ]
-    for p in patrones:
-        m = re.search(p, texto)
-        if m:
-            val = m.group(1).strip().rstrip(".")
-            val = re.split(r"\s{2,}|RESULTADO|RECUENTO|AMIKACINA|BLEE", val)[0]
-            return val.strip()
+
+    for patron in patrones:
+        coincidencia = re.search(patron, texto)
+        if coincidencia:
+            nombre = coincidencia.group(1).strip()
+            # eliminar caracteres sobrantes o cortados
+            nombre = re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ\s\-]", "", nombre)
+            nombre = nombre.replace("mirabil", "mirabilis")  # parche frecuente
+            return nombre.strip()
+
     return ""
 
 
@@ -109,10 +125,7 @@ def extraer_antibioticos_cmi_valor(texto):
         if not linea:
             continue
 
-        # limpieza de símbolos extra
         linea = re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ0-9 /\-<>=.()+µ]", "", linea)
-
-        # patrón más permisivo (nombre + CMI opcional + interpretación)
         m = re.match(
             r"^([A-Za-zÁÉÍÓÚÑáéíóúñ0-9 /()\-]+?)\s*(?:([<>]=?\s*-?\d*\.?\d+|-?\d+\.?\d*)\s*)?([A-Za-zÁÉÍÓÚÑáéíóúñ()\-+]+)$",
             linea
@@ -165,7 +178,7 @@ def extraer_antibioticos_cmi_valor(texto):
 
 def dividir_bloques_por_microorganismo(texto):
     texto = preprocesar_texto(texto)
-    if not re.search(r"(?mi)^\s*(\d+\.)|(^\*\s*Microorganismo)", texto):
+    if not re.search(r"(?mi)(^\s*\d+\.)|(^\*\s*Microorganismo)", texto):
         return [texto]
     bloques = re.split(r"(?mi)(?:^\s*\d+\.\s*$|(?=^\*\s*Microorganismo))", texto)
     bloques = [b.strip() for b in bloques if b.strip()]
@@ -179,10 +192,10 @@ def extraer_todo_por_bloques(texto):
 
     for bloque in bloques:
         micro = extraer_microorganismos(bloque)
-        antibs = extraer_antibioticos_cmi_valor(bloque)
+        if not micro:
+            micro = "No identificado"
 
-        if not micro and antibs == [("", "", "")]:
-            continue
+        antibs = extraer_antibioticos_cmi_valor(bloque)
 
         if antibs == [("", "", "")]:
             resultados.append({
@@ -203,7 +216,7 @@ def extraer_todo_por_bloques(texto):
                 })
 
     if not resultados:
-        return [{"Microorganismo": "", "Antibiotico": "", "CMI": "", "ANTVALOR": ""}]
+        return [{"Microorganismo": "No identificado", "Antibiotico": "", "CMI": "", "ANTVALOR": ""}]
     return resultados
 
 
@@ -239,5 +252,8 @@ df_final = pd.concat(
 )
 df_final["BLEE"] = df[text_col].apply(extraer_blee)
 
+# ==============================
+# SALIDA FINAL
+# ==============================
 df_final.to_excel(SALIDA_PATH, index=False)
 print(f"✅ Archivo generado correctamente: {SALIDA_PATH}")
