@@ -139,43 +139,85 @@ def extraer_microorganismos(texto):
 
     return " ".join(p.capitalize() for p in nombre.split())
 
-
 def extraer_antibioticos_cmi_valor(texto):
-    # Ya no usamos preprocesar_texto aquí, para mantener el texto
-    # lo más original posible y no confundir las líneas.
     texto = str(texto or "").strip() 
     texto = texto.replace("\r", "")
     resultados = []
 
     for linea in texto.splitlines():
+        linea_orig = linea.strip()
+        if not linea_orig:
+            continue
+
+        # DEBUGdef extraer_antibioticos_cmi_valor(texto):
+    texto = str(texto or "").strip() 
+    texto = texto.replace("\r", "")
+    resultados = []
+    
+    # DEBUG: Imprimir las primeras líneas para diagnóstico
+    debug_lines = texto.splitlines()[:25]
+    print("\n=== DEBUG: Primeras 25 líneas del texto ===")
+    for i, line in enumerate(debug_lines):
+        print(f"{i}: [{repr(line)}]")
+    print("=== FIN DEBUG ===\n")
+
+    for linea in texto.splitlines():
+        linea_orig = linea.strip()
+        if not linea_orig:
+            continue
+
+        # 1. PRIMERO limpiamos el "0 0" al final
+        linea = re.sub(r"\s+0\s+0(?:\s+\(CRC\))?\s*$", "", linea_orig, flags=re.I)
+        
+        # 2. Limpieza de caracteres no deseados
+        linea = re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ0-9 /:\-<>=.()+µ]", "", linea)
         linea = linea.strip()
+        
         if not linea:
             continue
-
-        # 1. Limpieza de caracteres no deseados
-        linea = re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ0-9 /:\-<>=.()+µ]", "", linea)
         
-        # 2. Eliminamos los sufijos " 0 0 " (o variaciones) de la linea para aislar la info
-        # Esto es crucial.
-        linea = re.sub(r"\s+0\s+0(?:\s+\(CRC\))?\s*$", "", linea, flags=re.I)
-        
-        # Regex (Simplificado y robusto):
-        # Grupo 1: Antibiótico (lo más amplio al inicio)
-        # Grupo 2: CMI (opcional, permite operadores y espacios)
-        # Grupo 3: Valor (la palabra clave)
-        m = re.match(
-            r"^([A-Za-zÁÉÍÓÚÑáéíóúñ0-9 /()\-]+?)\s*"
-            r"(?:([<>]=?\s*\d*\.?\d*)\s*)?"
-            r"([A-Za-zÁÉÍÓÚÑáéíóúñ()\-+]+)$",
-            linea
-        )
-        
-        if not m:
+        # 3. Dividir por espacios y analizar tokens
+        tokens = linea.split()
+        if len(tokens) < 2:
             continue
-
-        antib_raw, cmi_raw, val_raw = m.groups()
+        
+        # Identificar qué tokens son valores (SENSIBLE, RESISTENTE, etc)
+        antivalor_idx = None
+        for i, tok in enumerate(tokens):
+            tok_norm = normalizar_token(tok)
+            if es_antivalor_truncado(tok_norm):
+                antivalor_idx = i
+                break
+        
+        if antivalor_idx is None:
+            continue
+        
+        # El valor es el token identificado
+        val_raw = tokens[antivalor_idx]
+        
+        # Todo antes del valor es potencialmente antibiótico + CMI
+        partes_antes = tokens[:antivalor_idx]
+        if not partes_antes:
+            continue
+        
+        # Buscar CMI (número con/sin operadores) en las últimas partes
+        cmi_raw = None
+        antib_tokens = partes_antes
+        
+        # Revisar últimos 1-2 tokens para ver si hay CMI
+        for i in range(len(partes_antes) - 1, max(-1, len(partes_antes) - 3), -1):
+            tok = partes_antes[i]
+            # Verificar si es un número o tiene operadores
+            if re.match(r'^[<>]=?\s*\d*\.?\d+$|^\d+\.?\d+', tok):
+                cmi_raw = tok
+                antib_tokens = partes_antes[:i]
+                break
+        
+        # El resto es el antibiótico
+        antib_raw = ' '.join(antib_tokens)
+        
         antib = limpiar_nombre_antibiotico(antib_raw)
-        cmi = limpiar_cmi(cmi_raw)
+        cmi = limpiar_cmi(cmi_raw) if cmi_raw else ""
         val_tok = normalizar_token(val_raw)
 
         if not antib:
