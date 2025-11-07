@@ -41,8 +41,9 @@ def normalizar_token(t):
 def limpiar_cmi(valor):
     if not valor:
         return ""
-    m = re.search(r"-?\d+(?:\.\d+)?", str(valor))
-    return m.group(0) if m else ""
+    s = str(valor).strip()
+    s = re.sub(r"\s+", "", s) 
+    return s
 
 
 def limpiar_nombre_antibiotico(raw):
@@ -67,7 +68,8 @@ def es_antivalor_truncado(tok):
 def preprocesar_texto(texto):
     texto = str(texto or "")
     texto = texto.replace("\r", "")
-    texto = re.sub(r"\b0\s+0\b", "\n", texto)
+    # Se expande para incluir el formato "0 0 (CRC)"
+    texto = re.sub(r"\b0\s+0(?:\s+\(CRC\))?\b", "\n", texto, flags=re.I)
     texto = re.sub(r"[ \t]{2,}", " ", texto)
     return texto.strip()
 
@@ -82,42 +84,67 @@ def extraer_blee(texto):
                 return "Negativo"
     return ""
 
-
 def extraer_microorganismos(texto):
-    texto = preprocesar_texto(texto)
-    if re.search(r"(?i)para\s+otros\s+microorganism", texto):
-        return ""
+    # limpieza ligera pero manteniendo estructura
+    texto = texto.replace("\xa0", " ")
+    texto = re.sub(r"[ \t]+", " ", texto)
+    texto = re.sub(r"\r+", "\n", texto)
+    texto = re.sub(r"\n{2,}", "\n", texto).strip()
 
-    # limpieza extra: eliminar los molestos "0 0"
-    texto = re.sub(r"\b0\s*0\b", " ", texto)
+    # --- INICIO DE LA CORRECCIÓN ---
+    
+    # 1. Buscar encabezado clásico
+    # (AJUSTADO) Se cambia \s+ por [ \t]+ para que no cruce saltos de línea
+    patron_micro = re.compile(
+        r"(?im)^[ \t]*MICROORGANISMO[:\s]+([A-Za-zÁÉÍÓÚÑáéíóúñ\.]{2,}(?:[ \t]+[A-Za-zÁÉÍÓÚÑáéíóúñ\.]{1,}){0,4})"
+    )
+    m = patron_micro.search(texto)
+    if m:
+        nombre = m.group(1)
+    else:
+        # 2. Buscar formato tipo "Microorganismo   Salmonella..."
+        # (AJUSTADO) Se cambia \s* por [ \t]* y \s+ por [ \t]+
+        patron_inline = re.compile(
+            r"(?i)(?<!Este\s)microorganismo[ \t]*[:\-]?[ \t]*([A-Za-zÁÉÍÓÚÑáéíóúñ\.]{3,}(?:[ \t]+[A-Za-zÁÉÍÓÚÑáéíóúñ\.]{2,}){0,4})"
+        )
+        m = patron_inline.search(texto)
+        if m:
+            nombre = m.group(1)
+        else:
+            # 3. Buscar microorganismo por nombre conocido (fallback)
+            patron_directo = re.compile(
+                r"(?i)\b(Escherichia\s+col[ia]?|Klebsiella\s+pneumo[a-z]*|Enterococcus\s+fae[a-z]*|Proteus\s+mirab[a-z]*|Staphylococcus\s+aureus|Salmonella\s+enterica(?:\s+ssp\s+enterica)?|Acinetobacter\s+baum[a-z]*)"
+            )
+            m = patron_directo.search(texto)
+            nombre = m.group(1) if m else ""
+    
+    # --- FIN DE LA CORRECCIÓN ---
 
-    # patrones más flexibles que permiten:
-    # - presencia de número tipo "1:"
-    # - texto truncado o sin espacio
-    # - microorganismos con nombres compuestos
-    patrones = [
-        # Ej: Microorganismo 1: Candida parapsilosis
-        r"(?mi)\bmicroorganism\w*\s*(?:\d+:)?\s*([A-Za-zÁÉÍÓÚÑáéíóúñ]+(?:[\s\-]?[A-Za-zÁÉÍÓÚÑáéíóúñ]+)?)",
-        # Ej: MICROORGANISMO Proteus mirabil
-        r"(?mi)\bmicroorganism\w*[:\-\s]+([A-Za-zÁÉÍÓÚÑáéíóúñ]+(?:[\s\-]?[A-Za-zÁÉÍÓÚÑáéíóúñ]+)?)",
-        # fallback genérico (cuando no hay palabra "microorganismo")
-        r"(?mi)\baislado\s*de\s*([A-Za-zÁÉÍÓÚÑáéíóúñ]+(?:[\s\-]?[A-Za-zÁÉÍÓÚÑáéíóúñ]+)?)"
-    ]
+    if not nombre:
+        return "No identificado"
 
-    for patron in patrones:
-        coincidencia = re.search(patron, texto)
-        if coincidencia:
-            nombre = coincidencia.group(1).strip()
-            # eliminar caracteres sobrantes o cortados
-            nombre = re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ\s\-]", "", nombre)
-            nombre = nombre.replace("mirabil", "mirabilis")  # parche frecuente
-            return nombre.strip()
+    # Normalizar
+    nombre = re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ\s\-\.]", "", nombre)
+    reemplazos = {
+        r"\bcol\b": "coli",
+        r"\bmirabil\b": "mirabilis",
+        r"\baur\b": "aureus",
+        r"\bpneu\b": "pneumoniae",
+        r"\baero\b": "aerogenes",
+        r"\bbaum\b": "baumannii",
+        r"\bfa\b": "faecalis",
+    }
+    for k, v in reemplazos.items():
+        nombre = re.sub(k, v, nombre, flags=re.I)
 
-    return ""
+    return " ".join(p.capitalize() for p in nombre.split())
 
 
 def extraer_antibioticos_cmi_valor(texto):
-    texto = preprocesar_texto(texto)
+    # Ya no usamos preprocesar_texto aquí, para mantener el texto
+    # lo más original posible y no confundir las líneas.
+    texto = str(texto or "").strip() 
+    texto = texto.replace("\r", "")
     resultados = []
 
     for linea in texto.splitlines():
@@ -125,11 +152,24 @@ def extraer_antibioticos_cmi_valor(texto):
         if not linea:
             continue
 
-        linea = re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ0-9 /\-<>=.()+µ]", "", linea)
+        # 1. Limpieza de caracteres no deseados
+        linea = re.sub(r"[^A-Za-zÁÉÍÓÚÑáéíóúñ0-9 /:\-<>=.()+µ]", "", linea)
+        
+        # 2. Eliminamos los sufijos " 0 0 " (o variaciones) de la linea para aislar la info
+        # Esto es crucial.
+        linea = re.sub(r"\s+0\s+0(?:\s+\(CRC\))?\s*$", "", linea, flags=re.I)
+        
+        # Regex (Simplificado y robusto):
+        # Grupo 1: Antibiótico (lo más amplio al inicio)
+        # Grupo 2: CMI (opcional, permite operadores y espacios)
+        # Grupo 3: Valor (la palabra clave)
         m = re.match(
-            r"^([A-Za-zÁÉÍÓÚÑáéíóúñ0-9 /()\-]+?)\s*(?:([<>]=?\s*-?\d*\.?\d+|-?\d+\.?\d*)\s*)?([A-Za-zÁÉÍÓÚÑáéíóúñ()\-+]+)$",
+            r"^([A-Za-zÁÉÍÓÚÑáéíóúñ0-9 /()\-]+?)\s*"
+            r"(?:([<>]=?\s*\d*\.?\d*)\s*)?"
+            r"([A-Za-zÁÉÍÓÚÑáéíóúñ()\-+]+)$",
             linea
         )
+        
         if not m:
             continue
 
@@ -158,6 +198,7 @@ def extraer_antibioticos_cmi_valor(texto):
             val_norm = val_raw.capitalize()
 
         antib_upper = antib.upper()
+        # Verificación contra la lista de antibióticos
         valid = any(
             antib_upper.startswith(w) or w.startswith(antib_upper)
             for w in set_antib
@@ -167,6 +208,7 @@ def extraer_antibioticos_cmi_valor(texto):
 
     if not resultados:
         return [("", "", "")]
+    # Eliminación de duplicados
     seen, out = set(), []
     for a, c, v in resultados:
         key = (a, c, v)
@@ -174,7 +216,6 @@ def extraer_antibioticos_cmi_valor(texto):
             seen.add(key)
             out.append((a, c, v))
     return out
-
 
 def dividir_bloques_por_microorganismo(texto):
     texto = preprocesar_texto(texto)
