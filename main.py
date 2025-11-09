@@ -154,13 +154,6 @@ def extraer_antibioticos_cmi_valor(texto):
     texto = texto.replace("\r", "")
     resultados = []
     
-    # DEBUG: Imprimir las primeras líneas para diagnóstico
-    debug_lines = texto.splitlines()[:25]
-    print("\n=== DEBUG: Primeras 25 líneas del texto ===")
-    for i, line in enumerate(debug_lines):
-        print(f"{i}: [{repr(line)}]")
-    print("=== FIN DEBUG ===\n")
-
     for linea in texto.splitlines():
         linea_orig = linea.strip()
         if not linea_orig:
